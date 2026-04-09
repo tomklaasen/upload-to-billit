@@ -1,0 +1,16 @@
+[directories]
+source = "/path/to/source/directory"
+done = "/path/to/done/directory"
+
+[email]
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+username = "your_gmail_address@gmail.com"
+# Gmail App Password — generated at https://myaccount.google.com/apppasswords
+password = "xxxx xxxx xxxx xxxx"
+from_address = "your_gmail_address@gmail.com"
+to_address = "billit_intake_address@my.billit.be"
+subject = "Factuur"
+
+[healthchecks]
+url = "https://hc-ping.com/your-uuid-here"
