@@ -5,6 +5,7 @@ to Billit's document intake address, then moves it to the Dropbox done folder.
 Integrates with Healthchecks.io for cron monitoring.
 """
 
+import logging
 import mimetypes
 import posixpath
 import smtplib
@@ -16,6 +17,8 @@ from pathlib import Path
 import dropbox
 import requests
 from dropbox.files import FileMetadata
+
+log = logging.getLogger(__name__)
 
 
 def load_config(config_path: Path) -> dict:
@@ -89,6 +92,14 @@ def ensure_folder(dbx: dropbox.Dropbox, folder: str) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logging.getLogger("dropbox").setLevel(logging.WARNING)
+
     config_path = Path(__file__).parent / "config.toml"
     cfg = load_config(config_path)
 
@@ -103,19 +114,19 @@ def main() -> None:
         files = list_files(dbx, source_dir)
         ensure_folder(dbx, done_dir)
     except Exception as e:
-        print(f"Dropbox error: {e}", file=sys.stderr)
+        log.error(f"Dropbox error: {e}")
         ping(hc_url, "/fail")
         sys.exit(1)
 
     if not files:
-        print("No files found, nothing to do.")
+        log.info("No files found, nothing to do.")
         ping(hc_url)
         sys.exit(0)
 
     failed = []
     for entry in files:
         try:
-            print(f"Sending {entry.name}...")
+            log.info(f"Sending {entry.name}...")
             _, response = dbx.files_download(entry.path_lower)
             send_file(entry.name, response.content, cfg)
             # autorename avoids overwriting if a file with the same name already exists
@@ -124,18 +135,18 @@ def main() -> None:
                 posixpath.join(done_dir, entry.name),
                 autorename=True,
             )
-            print(f"  Moved to {result.metadata.path_display}")
+            log.info(f"  Moved to {result.metadata.path_display}")
         except Exception as e:
-            print(f"  ERROR for {entry.name}: {e}", file=sys.stderr)
+            log.error(f"  Failed for {entry.name}: {e}")
             failed.append(entry.name)
 
     if failed:
-        print(f"Failed files: {', '.join(failed)}", file=sys.stderr)
+        log.error(f"Failed files: {', '.join(failed)}")
         ping(hc_url, "/fail")
         sys.exit(1)
 
     ping(hc_url)
-    print("Done.")
+    log.info("Done.")
 
 
 if __name__ == "__main__":
