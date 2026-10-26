@@ -1,6 +1,14 @@
 [directories]
-source = "/path/to/source/directory"
-done = "/path/to/done/directory"
+# Dropbox paths, relative to the Dropbox root
+source = "/path/to/source/folder"
+done = "/path/to/done/folder"
+
+[dropbox]
+# From your app at https://www.dropbox.com/developers/apps
+app_key = "your_app_key"
+app_secret = "your_app_secret"
+# Generated with get_dropbox_token.py
+refresh_token = "your_refresh_token"
 
 [email]
 smtp_host = "smtp.gmail.com"

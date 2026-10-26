@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Scans a source directory for files and emails each one as an attachment
-to Billit's document intake address, then moves it to the done directory.
+Scans a Dropbox source folder for files and emails each one as an attachment
+to Billit's document intake address, then moves it to the Dropbox done folder.
 Integrates with Healthchecks.io for cron monitoring.
 """
 
-import shutil
+import mimetypes
+import posixpath
 import smtplib
 import sys
 import tomllib
 from email.message import EmailMessage
 from pathlib import Path
 
+import dropbox
 import requests
+from dropbox.files import FileMetadata
 
 
 def load_config(config_path: Path) -> dict:
@@ -28,23 +31,40 @@ def ping(url: str, suffix: str = "") -> None:
         pass
 
 
-def send_file(file_path: Path, cfg: dict) -> None:
+def connect_dropbox(cfg: dict) -> dropbox.Dropbox:
+    dbx_cfg = cfg["dropbox"]
+    return dropbox.Dropbox(
+        oauth2_refresh_token=dbx_cfg["refresh_token"],
+        app_key=dbx_cfg["app_key"],
+        app_secret=dbx_cfg["app_secret"],
+    )
+
+
+def list_files(dbx: dropbox.Dropbox, folder: str) -> list[FileMetadata]:
+    result = dbx.files_list_folder(folder)
+    entries = list(result.entries)
+    while result.has_more:
+        result = dbx.files_list_folder_continue(result.cursor)
+        entries.extend(result.entries)
+    return [e for e in entries if isinstance(e, FileMetadata) and not e.name.startswith(".")]
+
+
+def send_file(name: str, content: bytes, cfg: dict) -> None:
     email_cfg = cfg["email"]
 
     msg = EmailMessage()
     msg["From"] = email_cfg["from_address"]
     msg["To"] = email_cfg["to_address"]
     msg["Subject"] = email_cfg["subject"]
-    msg.set_content(f"Document in bijlage: {file_path.name}")
+    msg.set_content(f"Document in bijlage: {name}")
 
-    mime_type, mime_subtype = guess_mime_type(file_path)
-    with open(file_path, "rb") as f:
-        msg.add_attachment(
-            f.read(),
-            maintype=mime_type,
-            subtype=mime_subtype,
-            filename=file_path.name,
-        )
+    mime_type, mime_subtype = guess_mime_type(name)
+    msg.add_attachment(
+        content,
+        maintype=mime_type,
+        subtype=mime_subtype,
+        filename=name,
+    )
 
     with smtplib.SMTP(email_cfg["smtp_host"], email_cfg["smtp_port"]) as smtp:
         smtp.starttls()
@@ -52,12 +72,20 @@ def send_file(file_path: Path, cfg: dict) -> None:
         smtp.send_message(msg)
 
 
-def guess_mime_type(file_path: Path) -> tuple[str, str]:
-    import mimetypes
-    mime, _ = mimetypes.guess_type(file_path)
+def guess_mime_type(name: str) -> tuple[str, str]:
+    mime, _ = mimetypes.guess_type(name)
     if mime and "/" in mime:
         return tuple(mime.split("/", 1))
     return "application", "octet-stream"
+
+
+def ensure_folder(dbx: dropbox.Dropbox, folder: str) -> None:
+    try:
+        dbx.files_create_folder_v2(folder)
+    except dropbox.exceptions.ApiError as e:
+        # Folder already exists
+        if not (e.error.is_path() and e.error.get_path().is_conflict()):
+            raise
 
 
 def main() -> None:
@@ -67,17 +95,17 @@ def main() -> None:
     hc_url = cfg["healthchecks"]["url"]
     ping(hc_url, "/start")
 
-    source_dir = Path(cfg["directories"]["source"])
-    done_dir = Path(cfg["directories"]["done"])
+    source_dir = cfg["directories"]["source"]
+    done_dir = cfg["directories"]["done"]
 
-    if not source_dir.exists():
-        print(f"Source directory does not exist: {source_dir}", file=sys.stderr)
+    try:
+        dbx = connect_dropbox(cfg)
+        files = list_files(dbx, source_dir)
+        ensure_folder(dbx, done_dir)
+    except Exception as e:
+        print(f"Dropbox error: {e}", file=sys.stderr)
         ping(hc_url, "/fail")
         sys.exit(1)
-
-    done_dir.mkdir(parents=True, exist_ok=True)
-
-    files = [p for p in source_dir.iterdir() if p.is_file() and not p.name.startswith(".")]
 
     if not files:
         print("No files found, nothing to do.")
@@ -85,19 +113,21 @@ def main() -> None:
         sys.exit(0)
 
     failed = []
-    for file_path in files:
+    for entry in files:
         try:
-            print(f"Sending {file_path.name}...")
-            send_file(file_path, cfg)
-            dest = done_dir / file_path.name
-            # Avoid overwriting if a file with the same name already exists
-            if dest.exists():
-                dest = done_dir / f"{file_path.stem}_{file_path.stat().st_mtime_ns}{file_path.suffix}"
-            shutil.move(str(file_path), dest)
-            print(f"  Moved to {dest}")
+            print(f"Sending {entry.name}...")
+            _, response = dbx.files_download(entry.path_lower)
+            send_file(entry.name, response.content, cfg)
+            # autorename avoids overwriting if a file with the same name already exists
+            result = dbx.files_move_v2(
+                entry.path_lower,
+                posixpath.join(done_dir, entry.name),
+                autorename=True,
+            )
+            print(f"  Moved to {result.metadata.path_display}")
         except Exception as e:
-            print(f"  ERROR for {file_path.name}: {e}", file=sys.stderr)
-            failed.append(file_path.name)
+            print(f"  ERROR for {entry.name}: {e}", file=sys.stderr)
+            failed.append(entry.name)
 
     if failed:
         print(f"Failed files: {', '.join(failed)}", file=sys.stderr)
